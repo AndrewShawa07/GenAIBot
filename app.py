@@ -10,16 +10,14 @@ from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 
 
-# Load env variables
+#Load environment variables
 load_dotenv()
-
-
 API_KEY = os.getenv("GEMINI_API_KEY")
 if not API_KEY:
     raise ValueError("GEMINI_API_KEY environment variable not set")
 
 
-# Configure Gemini
+#Configure Gemini
 genai.configure(api_key=API_KEY)
 
 
@@ -27,10 +25,12 @@ app = Flask(__name__)
 CORS(app)
 
 
+#File paths
 PDF_PATH = "andrewmiccai.pdf"
+WEBSITE_JSON_PATH = "website_data.json"
 
 
-#Function to load PDF text
+#Helper: Load PDF text into chunks
 def load_pdf_text(pdf_path):
     try:
         reader = PdfReader(pdf_path)
@@ -38,13 +38,12 @@ def load_pdf_text(pdf_path):
         for page_num, page in enumerate(reader.pages):
             text = page.extract_text()
             if text:
-                # Split into smaller chunks (for embeddings)
-                for i in range(0, len(text), 1000):
+                for i in range(0, len(text), 1000):  # chunk size
                     chunk = text[i:i+1000]
                     text_chunks.append({
                         "id": f"page{page_num}_chunk{i}",
                         "text": chunk,
-                        "metadata": {"source": f"page_{page_num+1}"}
+                        "metadata": {"source": f"PDF_page_{page_num+1}"}
                     })
         return text_chunks
     except Exception as e:
@@ -52,73 +51,102 @@ def load_pdf_text(pdf_path):
         return []
 
 
-#Initialize ChromaDB with PDF
-def initialize_chroma_db():
+#Initialize PDF ChromaDB
+def initialize_chroma_db_pdf():
     client = chromadb.PersistentClient(path="./chroma_db_pdf")
-    sentence_transformer_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name="all-MiniLM-L6-v2"
-    )
-    collection_name = "insurance_pdf"
+    ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+    collection_name = "datafrompdf_pdf"
 
 
     try:
-        db_collection = client.get_collection(
-            name=collection_name, embedding_function=sentence_transformer_ef
-        )
+        db_collection = client.get_collection(name=collection_name, embedding_function=ef)
         if db_collection.count() > 0:
             print("PDF Vector database already populated")
             return db_collection
     except Exception:
-        db_collection = client.get_or_create_collection(
-            name=collection_name,
-            embedding_function=sentence_transformer_ef
-        )
+        db_collection = client.get_or_create_collection(name=collection_name, embedding_function=ef)
 
 
-    print("Loading PDF...")
+    print("Loading PDF into ChromaDB...")
     data = load_pdf_text(PDF_PATH)
-
-
     if not data:
         print("No text found in PDF")
         return None
 
 
-    documents = [d['text'] for d in data]
-    ids = [d['id'] for d in data]
-    metadatas = [d['metadata'] for d in data]
-
-
     db_collection.add(
-        documents=documents,
-        metadatas=metadatas,
-        ids=ids
+        documents=[d['text'] for d in data],
+        metadatas=[d['metadata'] for d in data],
+        ids=[d['id'] for d in data]
     )
-    print(f"Added {len(documents)} chunks from PDF into ChromaDB")
-
-
+    print(f"Added {len(data)} chunks from PDF into ChromaDB")
     return db_collection
 
 
-db_collection = initialize_chroma_db()
+#Initialize website JSON ChromaDB
+def initialize_chroma_db_website():
+    client = chromadb.PersistentClient(path="./chroma_db_website")
+    ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+    collection_name = "website_content"
 
 
-#Generate response
-def generate_response_and_suggestions(user_message, db_collection):
-    results = db_collection.query(
-        query_texts=[user_message],
-        n_results=3
+    try:
+        db_collection = client.get_collection(name=collection_name, embedding_function=ef)
+        if db_collection.count() > 0:
+            print("Website Vector database already populated")
+            return db_collection
+    except Exception:
+        db_collection = client.get_or_create_collection(name=collection_name, embedding_function=ef)
+
+
+    print("Loading website JSON into ChromaDB...")
+    try:
+        with open(WEBSITE_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        print("website_data.json not found")
+        return None
+
+
+    if not data:
+        print("website_data.json is empty")
+        return None
+
+
+    db_collection.add(
+        documents=[d['text'] for d in data],
+        metadatas=[d['metadata'] for d in data],
+        ids=[d['id'] for d in data]
     )
+    print(f"Added {len(data)} documents from website JSON into ChromaDB")
+    return db_collection
 
 
-    if not results["documents"] or not results["documents"][0]:
+#Initialize both DBs
+db_pdf = initialize_chroma_db_pdf()
+db_website = initialize_chroma_db_website()
+db_collections = [db for db in [db_pdf, db_website] if db is not None]
+
+
+#Generate response by querying both DBs
+def generate_response_and_suggestions(user_message, db_collections):
+    all_contexts = []
+
+
+    for db in db_collections:
+        results = db.query(query_texts=[user_message], n_results=3)
+        if results["documents"] and results["documents"][0]:
+            all_contexts.extend(results["documents"][0])
+
+
+    if not all_contexts:
         return {
-            "answer": "Sorry, I couldn’t find information in the Insurance Handbook.",
+            "answer": "We don’t have enough information in the handbook. Please contact Hush Solutions.",
             "suggestions": []
         }
 
 
-    context = " ".join(results['documents'][0])
+    context = " ".join(all_contexts)
 
 
     prompt = f"""
@@ -150,46 +178,39 @@ User question:
     try:
         model = genai.GenerativeModel("gemini-2.0-flash-lite")
         response = model.generate_content(prompt)
-        bot_text = response.text.strip()
-        cleaned_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", bot_text, flags=re.DOTALL).strip()
-
-
+        bot_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.text.strip(), flags=re.DOTALL).strip()
         try:
-            return json.loads(cleaned_text)
+            return json.loads(bot_text)
         except Exception:
-            return {"answer": cleaned_text, "suggestions": []}
-
-
+            return {"answer": bot_text, "suggestions": []}
     except Exception as e:
         print(f"Gemini API Error: {e}")
-        return {
-            "answer": "Sorry, I’m unable to generate a response right now.",
-            "suggestions": []
-        }
+        return {"answer": "Sorry, we are unable to generate a response right now.", "suggestions": []}
 
 
 #Flask API endpoint
 @app.route('/chat', methods=['POST'])
 def chat():
-    if db_collection is None:
+    if not db_collections:
         return jsonify({"response": "Chatbot service not available"}), 503
 
 
     data = request.get_json(silent=True)
-
-
     if not data or 'message' not in data or not isinstance(data['message'], str):
         return jsonify({"error": "Invalid JSON or missing 'message' key"}), 400
 
 
     user_message = data['message']
     print(f"User message: {user_message}")
-   
-    bot_response_data = generate_response_and_suggestions(user_message, db_collection)
+
+
+    bot_response_data = generate_response_and_suggestions(user_message, db_collections)
     print(f"Bot response data: {bot_response_data}")
-   
+
+
     return jsonify(bot_response_data)
 
 
+#Run the app
 if __name__ == '__main__':
     app.run(debug=True)
