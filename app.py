@@ -2,24 +2,24 @@ import os
 import re
 import json
 import chromadb
+import google.generativeai as genai
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from chromadb.utils import embedding_functions
-import google.generativeai as genai
 from dotenv import load_dotenv
+from PyPDF2 import PdfReader
 
 
-#Loading environment variables from .env file
+# Load env variables
 load_dotenv()
 
 
-#Getting API key from environment variable
 API_KEY = os.getenv("GEMINI_API_KEY")
 if not API_KEY:
     raise ValueError("GEMINI_API_KEY environment variable not set")
 
 
-#Configuring Gemini API
+# Configure Gemini
 genai.configure(api_key=API_KEY)
 
 
@@ -27,13 +27,38 @@ app = Flask(__name__)
 CORS(app)
 
 
-# Initialize ChromaDB and load data
+PDF_PATH = "andrewmiccai.pdf"
+
+
+#Function to load PDF text
+def load_pdf_text(pdf_path):
+    try:
+        reader = PdfReader(pdf_path)
+        text_chunks = []
+        for page_num, page in enumerate(reader.pages):
+            text = page.extract_text()
+            if text:
+                # Split into smaller chunks (for embeddings)
+                for i in range(0, len(text), 1000):
+                    chunk = text[i:i+1000]
+                    text_chunks.append({
+                        "id": f"page{page_num}_chunk{i}",
+                        "text": chunk,
+                        "metadata": {"source": f"page_{page_num+1}"}
+                    })
+        return text_chunks
+    except Exception as e:
+        print(f"Error reading PDF: {e}")
+        return []
+
+
+#Initialize ChromaDB with PDF
 def initialize_chroma_db():
-    client = chromadb.PersistentClient(path="./chroma_db")
+    client = chromadb.PersistentClient(path="./chroma_db_pdf")
     sentence_transformer_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name="all-MiniLM-L6-v2"
     )
-    collection_name = "website_content"
+    collection_name = "insurance_pdf"
 
 
     try:
@@ -41,7 +66,7 @@ def initialize_chroma_db():
             name=collection_name, embedding_function=sentence_transformer_ef
         )
         if db_collection.count() > 0:
-            print("Vector database already populated")
+            print("PDF Vector database already populated")
             return db_collection
     except Exception:
         db_collection = client.get_or_create_collection(
@@ -50,20 +75,15 @@ def initialize_chroma_db():
         )
 
 
-    print("Populating vector database...")
-   
-    try:
-        with open('website_data.json', 'r') as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        print("website_data.json not found")
-        return None
+    print("Loading PDF...")
+    data = load_pdf_text(PDF_PATH)
 
 
     if not data:
-        print("website_data.json is empty")
+        print("No text found in PDF")
         return None
-    # Prepare documents for insertion
+
+
     documents = [d['text'] for d in data]
     ids = [d['id'] for d in data]
     metadatas = [d['metadata'] for d in data]
@@ -74,7 +94,7 @@ def initialize_chroma_db():
         metadatas=metadatas,
         ids=ids
     )
-    print(f"Added {len(documents)} documents to database")
+    print(f"Added {len(documents)} chunks from PDF into ChromaDB")
 
 
     return db_collection
@@ -83,32 +103,39 @@ def initialize_chroma_db():
 db_collection = initialize_chroma_db()
 
 
+#Generate response
 def generate_response_and_suggestions(user_message, db_collection):
     results = db_collection.query(
         query_texts=[user_message],
-        n_results=1
+        n_results=3
     )
 
 
-    context = results['documents'][0][0]
+    if not results["documents"] or not results["documents"][0]:
+        return {
+            "answer": "Sorry, I couldn’t find information in the Insurance Handbook.",
+            "suggestions": []
+        }
+
+
+    context = " ".join(results['documents'][0])
 
 
     prompt = f"""
-You are an expert chatbot representing Hush Solutions. Provide a helpful answer based on the context.
+You are an expert chatbot representing Hush Solutions.
+Answer based only on the provided context. Always speak as "we" or "Hush Solutions".
 
 
-Speak as if you are the Hush Solutions team. Use "we" or "Hush Solutions", never "I" or "the company".
+If the context is insufficient, say:
+"We don’t have enough information in the handbook. Please contact Hush Solutions."
 
 
-After your answer, suggest 2-3 related questions based only on the context.
+After your answer, suggest 2–3 related questions.
 
 
-Format your response as JSON with:
-- "answer": The direct answer to the user's question
-- "suggestions": Array of suggested related questions
-
-
-If information is not in the context, state you don't have enough information and suggest contacting the company.
+Format strictly as JSON:
+- "answer": string
+- "suggestions": array of strings
 
 
 Context:
@@ -130,19 +157,18 @@ User question:
         try:
             return json.loads(cleaned_text)
         except Exception:
-            return {
-                "answer": cleaned_text,
-                "suggestions": []
-            }
+            return {"answer": cleaned_text, "suggestions": []}
 
 
     except Exception as e:
-        print(f"Error calling Gemini API: {e}")
+        print(f"Gemini API Error: {e}")
         return {
-            "answer": "Sorry, I am unable to generate a response at this time.",
+            "answer": "Sorry, I’m unable to generate a response right now.",
             "suggestions": []
         }
-#Bot API
+
+
+#Flask API endpoint
 @app.route('/chat', methods=['POST'])
 def chat():
     if db_collection is None:
@@ -167,4 +193,3 @@ def chat():
 
 if __name__ == '__main__':
     app.run(debug=True)
-    #json version from website_data.json
