@@ -215,7 +215,11 @@ Format your response as JSON with:
 - "suggestions": Array of suggested related questions
 
 
-If information is not in the context, state you don't have enough information and suggest contacting the company.
+If information is not in the context, state you don't have enough information and suggest the user visit the Contact Form on our Contact Page for further assistance.
+
+After your answer, suggest 2-3 related questions based only on the context.
+
+Format your response as JSON with:
 
 
 Context:
@@ -270,7 +274,7 @@ def chat():
 
     elif intent == "greet":
         return jsonify({
-            "answer": "Hello! How can Hush Solutions assist you today?",
+            "answer": "Hello! How can I assist you today?",
             "suggestions": [
                 "Tell me about insurance coverage",
                 "How do I file a claim?"
