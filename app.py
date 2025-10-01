@@ -11,6 +11,8 @@ from flask_cors import CORS
 from chromadb.utils import embedding_functions
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
+from pyngrok import ngrok, conf
+from flask_mail import Mail, Message
 
 
 #Loading environment variables
@@ -37,103 +39,108 @@ genai.configure(api_key=API_KEY)
 
 
 app = Flask(__name__)
+# Email configuration (example with Gmail)
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USERNAME'] = 'andrewshawa0420@gmail.com'   # replace
+app.config['MAIL_PASSWORD'] = 'buwz shtu ycvu zocs' # use App Password if Gmail
+app.config['MAIL_DEFAULT_SENDER'] = 'andrewshawa0420@gmail.com'
+
+mail = Mail(app)
 CORS(app)
 
-
-#File paths
-PDF_PATH = "insurancetest.pdf"
+# Paths  for PDFs and website JSON
+# PDF_FOLDER = "./pdfs"
 WEBSITE_JSON_PATH = "website_data.json"
+# def load_pdf_text(pdf_path, max_chars=1000):
+#     """Reads one PDF and splits its text into chunks."""
+#     try:
+#         reader = PdfReader(pdf_path)
+#         text_chunks = []
+
+#         for page_num, page in enumerate(reader.pages):
+#             text = page.extract_text()
+#             if not text:
+#                 continue
+
+#             sentences = sent_tokenize(text)
+#             chunk = ""
+#             chunk_index = 0
+
+#             for sentence in sentences:
+#                 if len(chunk) + len(sentence) > max_chars:
+#                     text_chunks.append({
+#                         "id": f"{os.path.basename(pdf_path)}_page{page_num}_chunk{chunk_index}",
+#                         "text": chunk.strip(),
+#                         "metadata": {
+#                             "source": f"{os.path.basename(pdf_path)}_page_{page_num+1}"
+#                         }
+#                     })
+#                     chunk_index += 1
+#                     chunk = sentence
+#                 else:
+#                     chunk += " " + sentence
+
+#             if chunk:
+#                 text_chunks.append({
+#                     "id": f"{os.path.basename(pdf_path)}_page{page_num}_chunk{chunk_index}",
+#                     "text": chunk.strip(),
+#                     "metadata": {
+#                         "source": f"{os.path.basename(pdf_path)}_page_{page_num+1}"
+#                     }
+#                 })
+
+#         return text_chunks
+
+#     except Exception as e:
+#         print(f"Error reading PDF {pdf_path}: {e}")
+#         return []
 
 
-#Load PDF text into chunks
+# def initialize_chroma_db_from_folder():
+#     """Scans the folder for PDFs and loads all into ChromaDB."""
+#     client = chromadb.PersistentClient(path="./chroma_db_pdf")
+#     ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+#     collection_name = "datafrompdf_pdf"
 
+#     try:
+#         db_collection = client.get_collection(name=collection_name, embedding_function=ef)
+#         if db_collection.count() > 0:
+#             print("PDF Vector database already populated")
+#             return db_collection
+#     except Exception:
+#         db_collection = client.get_or_create_collection(name=collection_name, embedding_function=ef)
 
+#     print("Scanning folder for PDFs...")
+#     all_data = []
+#     pdf_files = [f for f in os.listdir(PDF_FOLDER) if f.lower().endswith(".pdf")]
 
+#     if not pdf_files:
+#         print("No PDFs found in folder")
+#         return None
 
-def load_pdf_text(pdf_path, max_chars=1000):
-    """
-    Reads a PDF and splits its text into sentence-based chunks.
-    Each chunk is approximately max_chars characters long, preserving sentence boundaries.
-    Returns a list of dictionaries ready for ChromaDB insertion.
-    """
-    try:
-        reader = PdfReader(pdf_path)
-        text_chunks = []
+#     for pdf_file in pdf_files:
+#         pdf_path = os.path.join(PDF_FOLDER, pdf_file)
+#         chunks = load_pdf_text(pdf_path, max_chars=1000)
+#         if chunks:
+#             all_data.extend(chunks)
+#             print(f"Loaded {len(chunks)} chunks from {pdf_file}")
+#         else:
+#             print(f"No text found in {pdf_file}")
 
+#     if not all_data:
+#         print("No data extracted from any PDFs")
+#         return None
 
-        for page_num, page in enumerate(reader.pages):
-            text = page.extract_text()
-            if not text:
-                continue
+#     db_collection.add(
+#         documents=[d['text'] for d in all_data],
+#         metadatas=[d['metadata'] for d in all_data],
+#         ids=[d['id'] for d in all_data]
+#     )
 
-
-            sentences = sent_tokenize(text)
-            chunk = ""
-            chunk_index = 0
-
-
-            for sentence in sentences:
-                # Start a new chunk if adding the sentence exceeds max_chars
-                if len(chunk) + len(sentence) > max_chars:
-                    text_chunks.append({
-                        "id": f"page{page_num}_chunk{chunk_index}",
-                        "text": chunk.strip(),
-                        "metadata": {"source": f"PDF_page_{page_num+1}"}
-                    })
-                    chunk_index += 1
-                    chunk = sentence  # start a new chunk
-                else:
-                    chunk += " " + sentence
-
-
-            # Add the last chunk on the page if any
-            if chunk:
-                text_chunks.append({
-                    "id": f"page{page_num}_chunk{chunk_index}",
-                    "text": chunk.strip(),
-                    "metadata": {"source": f"PDF_page_{page_num+1}"}
-                })
-
-
-        return text_chunks
-
-
-    except Exception as e:
-        print(f"Error reading PDF: {e}")
-        return []
-
-
-#Initialize PDF ChromaDB
-def initialize_chroma_db_pdf():
-    client = chromadb.PersistentClient(path="./chroma_db_pdf")
-    ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-    collection_name = "datafrompdf_pdf"
-
-
-    try:
-        db_collection = client.get_collection(name=collection_name, embedding_function=ef)
-        if db_collection.count() > 0:
-            print("PDF Vector database already populated")
-            return db_collection
-    except Exception:
-        db_collection = client.get_or_create_collection(name=collection_name, embedding_function=ef)
-
-
-    print("Loading PDF into ChromaDB...")
-    data = load_pdf_text(PDF_PATH)
-    if not data:
-        print("No text found in PDF")
-        return None
-
-
-    data = load_pdf_text(PDF_PATH, max_chars=1000)  # use sentence-based chunks
-    db_collection.add(
-        documents=[d['text'] for d in data],
-        metadatas=[d['metadata'] for d in data],
-        ids=[d['id'] for d in data]
-    )
-    print(f"Added {len(data)} chunks from PDF into ChromaDB")
-    return db_collection
+#     print(f"Added {len(all_data)} total chunks from {len(pdf_files)} PDFs into ChromaDB")
+#     return db_collection
 
 
 #Initialize website JSON ChromaDB
@@ -176,10 +183,10 @@ def initialize_chroma_db_website():
 
 
 #Initialize both DBs
-db_pdf = initialize_chroma_db_pdf()
+# db_pdf = initialize_chroma_db_from_folder()
 db_website = initialize_chroma_db_website()
-db_collections = [db for db in [db_pdf, db_website] if db is not None]
-
+# db_collections = [db for db in [db_pdf, db_website] if db is not None]
+db_collections = [db for db in [db_website] if db is not None]
 
 #Generate response by querying both DBs
 def generate_response_and_suggestions(user_message, db_collections):
@@ -193,12 +200,8 @@ def generate_response_and_suggestions(user_message, db_collections):
 
 
     if not all_contexts:
-        return {
-            "answer": "I don’t have enough information on that. Please contact our Hush Solutions Limited team.",
-            "suggestions": []
-        }
-
-
+        return send_unanswered_email(user_message)
+    
     context = " ".join(all_contexts)
 
 
@@ -215,7 +218,8 @@ Format your response as JSON with:
 - "suggestions": Array of suggested related questions
 
 
-If information is not in the context, state you don't have enough information and suggest the user visit the Contact Form on our Contact Page for further assistance.
+If the context does NOT contain the answer, explicitly reply with:
+"INSUFFICIENT_INFO"
 
 After your answer, suggest 2-3 related questions based only on the context.
 
@@ -235,6 +239,10 @@ User question:
         model = genai.GenerativeModel("gemini-2.0-flash-lite")
         response = model.generate_content(prompt)
         bot_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.text.strip(), flags=re.DOTALL).strip()
+        
+        if "INSUFFICIENT_INFO" in bot_text.upper():
+            return send_unanswered_email(user_message)
+        
         try:
             return json.loads(bot_text)
         except Exception:
@@ -243,6 +251,21 @@ User question:
         print(f"Gemini API Error: {e}")
         return {"answer": "Sorry, we are unable to generate a response right now.", "suggestions": []}
 
+def send_unanswered_email(user_message):
+        try:
+            msg = Message(
+                subject="Unanswered Chatbot Query",
+                recipients=["mulasi.chipalo@hushbposervices.com"],
+                body=f"A user asked: {user_message}\n\nThis could not be answered by the chatbot."
+            )
+            mail.send(msg)
+            print(f"📧 Sent unanswered query email: {user_message}")
+        except Exception as e:
+            print(f"Email sending failed: {e}")
+        return {
+            "answer": "Thank you for your question! Our team will respond shortly.",
+            "suggestions": []
+        }
 
 #Flask API endpoint
 @app.route('/chat', methods=['POST'])
@@ -289,6 +312,20 @@ def chat():
         return jsonify(bot_response_data)
 
 
-# Run the app
+# Running the app with tunneling
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Configure ngrok with authtoken
+    conf.get_default().auth_token = "33Q1qbwIdyZWgWFVlW7TceZBVvx_VV2RhytAWEFRBWfUdy1m"  
+    
+    # Creating a public tunnel for testing purposes
+    print("Starting ngrok tunnel...")
+    public_url = ngrok.connect(5000)
+    print(f"The Flask app is now publicly accessible at: {public_url}")
+    print(f"URL to use in Postman: {public_url}/chat")
+    
+    # Start Flask app WITHOUT debug mode to avoid instance conflicts
+    try:
+        app.run(host='0.0.0.0', port=5000, debug=False)
+    except KeyboardInterrupt:
+        print("\nShutting down tunnel...")
+        ngrok.kill()
