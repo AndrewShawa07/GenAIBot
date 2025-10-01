@@ -15,6 +15,8 @@
             --message-bg-user: #e0f2fe;
             --shadow-color: rgba(0, 0, 0, 0.1);
             --border-color: #e2e8f0;
+            --error-color: #ef4444;
+            --success-color: #10b981;
         }
 
         body {
@@ -187,6 +189,82 @@
             }
         }
 
+        /* Email Form Styles */
+        .email-form {
+            align-self: flex-start;
+            max-width: 85%;
+            padding: 20px;
+            background-color: var(--message-bg-bot);
+            border-radius: 20px;
+            border-bottom-left-radius: 10px;
+            margin-top: 10px;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.05);
+        }
+
+        .email-form p {
+            margin: 0 0 15px 0;
+            color: var(--text-color);
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }
+
+        .email-input-group {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .email-input {
+            flex-grow: 1;
+            padding: 12px 16px;
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            font-size: 0.95rem;
+            transition: all 0.3s;
+        }
+
+        .email-input:focus {
+            outline: none;
+            border-color: var(--secondary-color);
+            box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.25);
+        }
+
+        .email-submit-btn {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 0.95rem;
+            font-weight: 500;
+            transition: all 0.3s;
+            white-space: nowrap;
+        }
+
+        .email-submit-btn:hover {
+            background-color: var(--secondary-color);
+        }
+
+        .email-submit-btn:disabled {
+            background-color: #9ca3af;
+            cursor: not-allowed;
+        }
+
+        .email-error {
+            color: var(--error-color);
+            font-size: 0.85rem;
+            margin-top: 8px;
+            display: none;
+        }
+
+        .email-success {
+            color: var(--success-color);
+            font-size: 0.85rem;
+            margin-top: 8px;
+            display: none;
+        }
+
         /* Mobile adjustments */
         @media (max-width: 640px) {
             .chat-container {
@@ -206,6 +284,16 @@
             }
             .suggestion-button {
                 max-width: 100%;
+            }
+            .email-form {
+                max-width: 90%;
+            }
+            .email-input-group {
+                flex-direction: column;
+                gap: 10px;
+            }
+            .email-submit-btn {
+                width: 100%;
             }
         }
     </style>
@@ -231,14 +319,18 @@
         const userInput = document.getElementById('user-input');
         const sendButton = document.getElementById('send-button');
 
-        // Backend server URL
+        // Backend server URLs
         const backendUrl = 'http://127.0.0.1:5000/chat';
+        const submitEmailUrl = 'http://127.0.0.1:5000/submit_email';
+
+        // Store current question ID for email submission
+        let currentQuestionId = null;
 
         async function sendMessage(messageToSend) {
             const message = messageToSend || userInput.value.trim();
             if (message === '') return;
 
-            //Display user's message
+            // Display user's message
             const userMessageDiv = document.createElement('div');
             userMessageDiv.className = 'message user-message fade-in';
             userMessageDiv.textContent = message;
@@ -246,7 +338,7 @@
             userInput.value = '';
             chatBox.scrollTop = chatBox.scrollHeight;
 
-            //Show loading indicator
+            // Show loading indicator
             const loadingDiv = document.createElement('div');
             loadingDiv.className = 'loading-dots';
             loadingDiv.innerHTML = '<span></span><span></span><span></span>';
@@ -254,7 +346,7 @@
             chatBox.scrollTop = chatBox.scrollHeight;
 
             try {
-                //Send message to backend and get structured response
+                // Send message to backend and get structured response
                 const response = await fetch(backendUrl, {
                     method: 'POST',
                     headers: {
@@ -268,16 +360,22 @@
                 }
                 const data = await response.json();
                 
-                //Remove loading indicator
+                // Remove loading indicator
                 chatBox.removeChild(loadingDiv);
 
-                //Show bot's answer
+                // Show bot's answer
                 const botMessageDiv = document.createElement('div');
                 botMessageDiv.className = 'message bot-message fade-in';
                 botMessageDiv.textContent = data.answer;
                 chatBox.appendChild(botMessageDiv);
 
-                //Show suggestions
+                // Check if email is needed
+                if (data.needs_email && data.question_id) {
+                    currentQuestionId = data.question_id;
+                    showEmailForm();
+                }
+
+                // Show suggestions
                 if (data.suggestions && data.suggestions.length > 0) {
                     const suggestionsBox = document.createElement('div');
                     suggestionsBox.className = 'suggestions-box';
@@ -308,13 +406,110 @@
             }
         }
 
-        //Event listeners for sending message
+        function showEmailForm() {
+            const emailForm = document.createElement('div');
+            emailForm.className = 'email-form fade-in';
+            emailForm.innerHTML = `
+                <p>For a detailed response from our team, please provide your email address:</p>
+                <div class="email-input-group">
+                    <input type="email" class="email-input" placeholder="your.email@example.com">
+                    <button class="email-submit-btn">Submit Email</button>
+                </div>
+                <div class="email-error">Please enter a valid email address</div>
+                <div class="email-success">Thank you! We'll contact you shortly.</div>
+            `;
+
+            chatBox.appendChild(emailForm);
+            chatBox.scrollTop = chatBox.scrollHeight;
+
+            const emailInput = emailForm.querySelector('.email-input');
+            const submitBtn = emailForm.querySelector('.email-submit-btn');
+            const errorMsg = emailForm.querySelector('.email-error');
+            const successMsg = emailForm.querySelector('.email-success');
+
+            // Submit email on button click
+            submitBtn.addEventListener('click', () => submitEmail(emailInput, submitBtn, errorMsg, successMsg));
+
+            // Submit email on Enter key
+            emailInput.addEventListener('keypress', (event) => {
+                if (event.key === 'Enter') {
+                    submitEmail(emailInput, submitBtn, errorMsg, successMsg);
+                }
+            });
+
+            // Clear error when user starts typing
+            emailInput.addEventListener('input', () => {
+                errorMsg.style.display = 'none';
+            });
+        }
+
+        async function submitEmail(emailInput, submitBtn, errorMsg, successMsg) {
+            const email = emailInput.value.trim();
+            
+            // Basic email validation
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRegex.test(email)) {
+                errorMsg.style.display = 'block';
+                emailInput.focus();
+                return;
+            }
+
+            // Disable button and show loading state
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Sending...';
+
+            try {
+                const response = await fetch(submitEmailUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        email: email,
+                        question_id: currentQuestionId
+                    }),
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    // Show success message
+                    successMsg.style.display = 'block';
+                    errorMsg.style.display = 'none';
+                    submitBtn.style.display = 'none';
+                    emailInput.disabled = true;
+                    
+                    // Remove the email form after 3 seconds
+                    setTimeout(() => {
+                        const emailForm = emailInput.closest('.email-form');
+                        if (emailForm) {
+                            emailForm.remove();
+                        }
+                    }, 3000);
+                } else {
+                    throw new Error(result.error || 'Failed to submit email');
+                }
+            } catch (error) {
+                console.error('Error submitting email:', error);
+                errorMsg.textContent = error.message || 'Failed to submit email. Please try again.';
+                errorMsg.style.display = 'block';
+                
+                // Re-enable button
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Submit Email';
+            }
+        }
+
+        // Event listeners for sending message
         sendButton.addEventListener('click', () => sendMessage());
         userInput.addEventListener('keypress', (event) => {
             if (event.key === 'Enter') {
                 sendMessage();
             }
         });
+
+        // Focus input on load
+        userInput.focus();
     </script>
 </body>
 </html>
