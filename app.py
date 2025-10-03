@@ -3,18 +3,19 @@ import re
 import json
 import chromadb
 import nltk
-nltk.download('punkt_tab')
+import sqlite3
+import uuid
+import threading
+from datetime import datetime
 from nltk.tokenize import sent_tokenize
 import google.generativeai as genai
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session
 from flask_cors import CORS
 from chromadb.utils import embedding_functions
 from dotenv import load_dotenv
-from PyPDF2 import PdfReader
 from pyngrok import ngrok, conf
 from flask_mail import Mail, Message
-from datetime import datetime
-
+import secrets
 
 # Loading environment variables
 load_dotenv()
@@ -22,24 +23,12 @@ API_KEY = os.getenv("GEMINI_API_KEY")
 if not API_KEY:
     raise ValueError("GEMINI_API_KEY environment variable not set")
 
-
-# Adding intent detection function for greetings and farewells
-def detect_intent(user_message):
-    msg = user_message.strip().lower()
-    if msg in ["bye", "exit", "quit", "goodbye"]:
-        return "farewell"
-    if msg in ["hi", "hello", "hey"]:
-        return "greet"
-    if msg in ["no", "nah", "not really"]:
-        return "negative"
-    return "unknown"
-
-
 # Configure Gemini
 genai.configure(api_key=API_KEY)
 
-
 app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-in-production")
+
 # Email configuration
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
 app.config['MAIL_PORT'] = 587
@@ -49,10 +38,85 @@ app.config['MAIL_PASSWORD'] = 'buwz shtu ycvu zocs'
 app.config['MAIL_DEFAULT_SENDER'] = 'andrewshawa0420@gmail.com'
 
 mail = Mail(app)
-CORS(app)
+CORS(app, supports_credentials=True)
 
 # Path for website JSON
 WEBSITE_JSON_PATH = "website_data.json"
+
+# Database-based question manager
+class QuestionManager:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.init_db()
+    
+    def init_db(self):
+        with self.lock:
+            conn = sqlite3.connect('pending_questions.db', check_same_thread=False)
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS pending_questions (
+                    question_id TEXT PRIMARY KEY,
+                    question_text TEXT NOT NULL,
+                    user_session TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_created_at 
+                ON pending_questions(created_at)
+            ''')
+            conn.commit()
+            conn.close()
+    
+    def add_question(self, question_id, question_text, user_session=None):
+        with self.lock:
+            conn = sqlite3.connect('pending_questions.db', check_same_thread=False)
+            conn.execute(
+                'INSERT INTO pending_questions (question_id, question_text, user_session) VALUES (?, ?, ?)',
+                (question_id, question_text, user_session)
+            )
+            print(f"🫱🏽‍🫲🏽Stored question {question_id} in database")
+            conn.commit()
+            conn.close()
+    
+    def get_question(self, question_id):
+        with self.lock:
+            conn = sqlite3.connect('pending_questions.db', check_same_thread=False)
+            cursor = conn.execute(
+                'SELECT question_text FROM pending_questions WHERE question_id = ?',
+                (question_id,)
+            )
+            result = cursor.fetchone()
+            conn.close()
+            return result[0] if result else None
+    
+    def remove_question(self, question_id):
+        with self.lock:
+            conn = sqlite3.connect('pending_questions.db', check_same_thread=False)
+            conn.execute('DELETE FROM pending_questions WHERE question_id = ?', (question_id,))
+            conn.commit()
+            conn.close()
+    
+    def cleanup_old_questions(self, hours=24):
+        with self.lock:
+            conn = sqlite3.connect('pending_questions.db', check_same_thread=False)
+            conn.execute(
+                'DELETE FROM pending_questions WHERE datetime(created_at) < datetime("now", ?)',
+                (f"-{hours} hours",)
+            )
+            deleted_count = conn.total_changes
+            conn.commit()
+            conn.close()
+            return deleted_count
+
+# Initialize question manager
+question_manager = QuestionManager()
+
+# Session management
+@app.before_request
+def make_session_permanent():
+    session.permanent = True
+    if 'user_id' not in session:
+        session['user_id'] = secrets.token_hex(16)
 
 # Initialize website JSON ChromaDB
 def initialize_chroma_db_website():
@@ -88,13 +152,26 @@ def initialize_chroma_db_website():
     print(f"Added {len(data)} documents from website JSON into ChromaDB")
     return db_collection
 
-
 # Initialize DB
 db_website = initialize_chroma_db_website()
 db_collections = [db for db in [db_website] if db is not None]
 
-# Store pending questions that need email follow-up (in production, use a database)
-pending_questions = {}
+# Adding intent detection function for greetings and farewells
+def detect_intent(user_message):
+    msg = user_message.strip().lower()
+    if msg in ["bye", "exit", "quit", "goodbye"]:
+        return "farewell"
+    if msg in ["hi", "hello", "hey"]:
+        return "greet"
+    if msg in ["no", "nah", "not really"]:
+        return "negative"
+    return "unknown"
+
+# Question ID generation
+def generate_question_id():
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    unique_id = str(uuid.uuid4())[:8]
+    return f"{timestamp}_{unique_id}"
 
 # Email validation function
 def is_valid_email(email):
@@ -110,13 +187,14 @@ def generate_response_and_suggestions(user_message, db_collections):
             all_contexts.extend(results["documents"][0])
 
     if not all_contexts:
-        # Store the question temporarily and return response asking for email
-        question_id = datetime.now().strftime("%Y%m%d%H%M%S")
-        pending_questions[question_id] = user_message
+        # Store the question in database and return response asking for email
+        question_id = generate_question_id()
+        user_session = session.get('user_id')
+        question_manager.add_question(question_id, user_message, user_session)
         
         return {
-            "answer": "Thank you for your question! Our team will review it. For a faster and more detailed response, please provide your email address so we can contact you directly.",
-            "suggestions": ["Would you like to provide your email for follow-up?"],
+            "answer": "I am unable to answer that at the moment. Your question has been forwarded to our team for review.",
+            # "suggestions": ["Would you like to provide your email for follow-up?"],
             "needs_email": True,
             "question_id": question_id
         }
@@ -149,13 +227,14 @@ User question:
         bot_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.text.strip(), flags=re.DOTALL).strip()
         
         if "INSUFFICIENT_INFO" in bot_text.upper():
-            # Store the question temporarily and return response asking for email
-            question_id = datetime.now().strftime("%Y%m%d%H%M%S")
-            pending_questions[question_id] = user_message
+            # Store the question in database and return response asking for email
+            question_id = generate_question_id()
+            user_session = session.get('user_id')
+            question_manager.add_question(question_id, user_message, user_session)
             
             return {
-                "answer": "Thank you for your question! Our team will review it. For a faster and more detailed response, please provide your email address so we can contact you directly.",
-                "suggestions": ["Would you like to provide your email for follow-up?"],
+                "answer": "I am unable to answer that at the moment. Your question has been forwarded to our team for review.",
+                # "suggestions": ["Would you like to provide your email for follow-up?"],
                 "needs_email": True,
                 "question_id": question_id
             }
@@ -190,6 +269,7 @@ def chat():
 
     user_message = data['message']
     print(f"User message: {user_message}")
+    print(f"User session: {session.get('user_id')}")
     
     # Check for intents first
     intent = detect_intent(user_message)
@@ -234,11 +314,10 @@ def submit_email():
     if not is_valid_email(user_email):
         return jsonify({"error": "Please provide a valid email address"}), 400
     
-    # Check if question exists in pending questions
-    if question_id not in pending_questions:
+    # Check if question exists in database
+    question = question_manager.get_question(question_id)
+    if not question:
         return jsonify({"error": "Invalid question ID or question has expired"}), 400
-    
-    question = pending_questions[question_id]
     
     # Send email with both question and user email
     try:
@@ -250,17 +329,15 @@ New Unanswered Question from Chatbot:
 
 User Email: {user_email}
 Question: {question}
-Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Question ID: {question_id}
+User Session: {session.get('user_id', 'Unknown')}
+Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 This question could not be answered by the chatbot and requires human assistance.
 Please follow up with the user directly.
 """
         )
         mail.send(msg)
-        
-        # Remove the question from pending list after successful email
-        del pending_questions[question_id]
         
         print(f"🫱🏽‍🫲🏽 Sent follow-up email for question {question_id} from {user_email}")
         
@@ -273,38 +350,26 @@ Please follow up with the user directly.
         print(f"Email sending failed: {e}")
         return jsonify({"error": "Failed to submit email. Please try again later."}), 500
 
-# Optional: Endpoint to check if a question is still pending
+# Optionally   check if a question is still pending
 @app.route('/check_question/<question_id>', methods=['GET'])
 def check_question(question_id):
-    if question_id in pending_questions:
+    question = question_manager.get_question(question_id)
+    if question:
         return jsonify({
             "exists": True,
-            "question": pending_questions[question_id]
+            "question": question
         })
     else:
         return jsonify({"exists": False})
 
-# Optional: Clean up old pending questions (could be run periodically)
-def cleanup_pending_questions(hours=24):
-    """Remove questions older than specified hours"""
-    current_time = datetime.now()
-    expired_questions = []
-    
-    for question_id in list(pending_questions.keys()):
-        try:
-            # Extract timestamp from question_id (format: YYYYMMDDHHMMSS)
-            question_time = datetime.strptime(question_id, "%Y%m%d%H%M%S")
-            if (current_time - question_time).total_seconds() > hours * 3600:
-                expired_questions.append(question_id)
-        except ValueError:
-            # If ID format is invalid, remove it
-            expired_questions.append(question_id)
-    
-    for question_id in expired_questions:
-        del pending_questions[question_id]
-    
-    if expired_questions:
-        print(f"Cleaned up {len(expired_questions)} expired questions")
+# cleanup endpoint to remotely trigger cleanup of old questions if needed
+@app.route('/cleanup_questions', methods=['POST'])
+def cleanup_questions():
+    try:
+        deleted_count = question_manager.cleanup_old_questions(hours=24)
+        return jsonify({"success": True, "cleaned_up": deleted_count})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # Running the app with tunneling
 if __name__ == '__main__':
@@ -316,9 +381,6 @@ if __name__ == '__main__':
     public_url = ngrok.connect(5000)
     print(f"The Flask app is now publicly accessible at: {public_url}")
     print(f"URL to use in Postman: {public_url}/chat")
-    
-    # Clean up any expired questions on startup
-    cleanup_pending_questions()
     
     # Start Flask app WITHOUT debug mode to avoid instance conflicts
     try:

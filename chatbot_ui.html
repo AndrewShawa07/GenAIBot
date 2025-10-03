@@ -265,6 +265,19 @@
             display: none;
         }
 
+        /* Session Info (for debugging) */
+        .session-info {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 0.8rem;
+            display: none; /* Set to 'block' for debugging */
+        }
+
         /* Mobile adjustments */
         @media (max-width: 640px) {
             .chat-container {
@@ -299,6 +312,11 @@
     </style>
 </head>
 <body>
+    <!-- Session info for debugging -->
+    <div class="session-info" id="session-info">
+        Session: <span id="session-id"></span>
+    </div>
+
     <div class="chat-container">
         <div class="chat-header">
             Hush Chatbot
@@ -318,10 +336,22 @@
         const chatBox = document.getElementById('chat-box');
         const userInput = document.getElementById('user-input');
         const sendButton = document.getElementById('send-button');
+        const sessionInfo = document.getElementById('session-info');
+        const sessionIdElement = document.getElementById('session-id');
 
         // Backend server URLs
         const backendUrl = 'http://127.0.0.1:5000/chat';
         const submitEmailUrl = 'http://127.0.0.1:5000/submit_email';
+
+        // Session management - Initialize session ID
+        let sessionId = sessionStorage.getItem('chatbot_session_id');
+        if (!sessionId) {
+            sessionId = Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            sessionStorage.setItem('chatbot_session_id', sessionId);
+        }
+        
+        // Display session ID for debugging (optional)
+        sessionIdElement.textContent = sessionId.substring(0, 8) + '...';
 
         // Store current question ID for email submission
         let currentQuestionId = null;
@@ -353,6 +383,7 @@
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({ message: message }),
+                    credentials: 'include' // Important for session cookies
                 });
 
                 if (!response.ok) {
@@ -468,6 +499,7 @@
                         email: email,
                         question_id: currentQuestionId
                     }),
+                    credentials: 'include' // Important for session cookies
                 });
 
                 const result = await response.json();
@@ -510,6 +542,9 @@
 
         // Focus input on load
         userInput.focus();
+
+        // Log session info for debugging
+        console.log('Chatbot session ID:', sessionId);
     </script>
 </body>
 </html>
